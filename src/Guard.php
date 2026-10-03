@@ -49,6 +49,9 @@ final class Guard {
 	/** @var Content */
 	private $content;
 
+	/** @var Tokens */
+	private $tokens;
+
 	/** @var string */
 	private $reason = '';
 
@@ -106,6 +109,7 @@ final class Guard {
 			$storage = new FileStorage( $storage );
 		}
 		$this->storage = $storage instanceof Storage ? $storage : null;
+		$this->tokens  = new Tokens( $this->config['secret'], $this->config['token_lifetime'], $this->config['clock'] );
 		$this->content = new Content(
 			$this->config['words'],
 			$this->config['block_disposable'] ? dirname( __DIR__ ) . '/data/disposable-domains.txt' : null
@@ -166,12 +170,11 @@ final class Guard {
 	 * @return array{js:string,act:string,ts:string,issued:int}
 	 */
 	public function tokens() {
-		$now = $this->now();
 		return array(
-			'js'     => $this->sign( 'js|' . $this->tick() ),
-			'act'    => $this->sign( 'act|' . $this->tick() ),
-			'ts'     => $now . ':' . $this->sign( 'ts|' . $now ),
-			'issued' => $now,
+			'js'     => $this->tokens->token( 'js' ),
+			'act'    => $this->tokens->token( 'act' ),
+			'ts'     => $this->tokens->stamp(),
+			'issued' => $this->now(),
 		);
 	}
 
@@ -234,20 +237,20 @@ final class Guard {
 		}
 
 		if ( 'basic' !== $context ) {
-			if ( ! $this->verifyToken( 'js', self::posted( $post, 'se_js' ) ) ) {
+			if ( ! $this->tokens->verify( 'js', self::posted( $post, 'se_js' ) ) ) {
 				return $this->flag( 'missing_js_token', $ip );
 			}
-			$age = $this->verifyTimestamp( self::posted( $post, 'se_ts' ) );
+			$age = $this->tokens->verifyStamp( self::posted( $post, 'se_ts' ) );
 			if ( null === $age ) {
 				return $this->flag( 'tampered_timestamp', $ip );
 			}
 			if ( $age < (int) $this->config['min_seconds'] ) {
 				return $this->flag( 'too_fast', $ip );
 			}
-			if ( $age > $this->lifetime() ) {
+			if ( $age > $this->tokens->lifetime() ) {
 				return $this->flag( 'expired_token', $ip );
 			}
-			if ( ! $this->verifyToken( 'act', self::posted( $post, 'se_act' ) ) ) {
+			if ( ! $this->tokens->verify( 'act', self::posted( $post, 'se_act' ) ) ) {
 				return $this->flag( 'no_interaction', $ip );
 			}
 		}
@@ -371,46 +374,6 @@ final class Guard {
 		);
 	}
 
-	private function verifyToken( $purpose, $value ) {
-		if ( '' === $value ) {
-			return false;
-		}
-		// The current and previous tick, so a token lasts between half and the whole lifetime.
-		for ( $i = 0; $i <= 1; $i++ ) {
-			if ( hash_equals( $this->sign( $purpose . '|' . $this->tick( $i ) ), $value ) ) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * @param string $signed "time:signature".
-	 * @return int|null Age in seconds, or null when invalid.
-	 */
-	private function verifyTimestamp( $signed ) {
-		$parts = explode( ':', $signed, 2 );
-		if ( count( $parts ) !== 2 || '' === $parts[1] || ! ctype_digit( $parts[0] ) ) {
-			return null;
-		}
-		if ( ! hash_equals( $this->sign( 'ts|' . $parts[0] ), $parts[1] ) ) {
-			return null;
-		}
-		return $this->now() - (int) $parts[0];
-	}
-
-	private function sign( $data ) {
-		return substr( hash_hmac( 'sha256', 'spam-eater|' . $data, $this->config['secret'] ), 0, 32 );
-	}
-
-	private function tick( $offset = 0 ) {
-		return (int) ceil( $this->now() / (int) floor( $this->lifetime() / 2 ) ) - $offset;
-	}
-
-	private function lifetime() {
-		return max( 3600, (int) $this->config['token_lifetime'] );
-	}
-
 	private function blockSeconds() {
 		return max( 1, (int) $this->config['block_hours'] ) * 3600;
 	}
@@ -421,7 +384,7 @@ final class Guard {
 	}
 
 	private function now() {
-		return is_callable( $this->config['clock'] ) ? (int) call_user_func( $this->config['clock'] ) : time();
+		return $this->tokens->now();
 	}
 
 	private static function posted( array $post, $key ) {

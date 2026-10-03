@@ -211,6 +211,27 @@ same( false, $g->check( human( $g, 10, array( 'email' => 'jo@gmail.com' ) ), 'fu
 $g = guard();
 same( false, $g->check( human( $g, 10, array( 'email' => 'x@mailinator.com' ) ), 'full', $server ), 'throwaway check is off by default' );
 
+$c = new Content( '', function () {
+	return array( 'throwaway.test' => true );
+} );
+ok( $c->isDisposableDomain( 'a.throwaway.test' ) && ! $c->isDisposableDomain( 'mailinator.com' ), 'the domain list can come from a function' );
+same( 1, $c->countDomains(), 'countDomains()' );
+same( array( 'ok(' ), Content::collect( array( 'v' => "ok\xC3\x28" ) ), 'invalid UTF-8 is dropped' );
+same( array( 'X' ), Content::collect( array( 'v' => 'x', 'my_csrf' => 'y' ), array(), 'strtoupper' ), 'collect() takes a cleaner and skips CSRF fields' );
+
+// --- Tokens -------------------------------------------------------------------
+
+$t     = new \AccessNow\SpamEater\Tokens( $secret, 7200, $clock );
+$token = $t->token( 'js' );
+ok( $t->verify( 'js', $token ) && ! $t->verify( 'act', $token ), 'a token is tied to its purpose' );
+$now += 3600;
+ok( $t->verify( 'js', $token ), 'the previous tick is still accepted' );
+$now += 3600;
+ok( ! $t->verify( 'js', $token ), 'two ticks later it is not' );
+same( 3600, ( new \AccessNow\SpamEater\Tokens( $secret, 60 ) )->lifetime(), 'lifetime is at least an hour' );
+same( 5, ( function () use ( $t, &$now ) { $s = $t->stamp(); $now += 5; return $t->verifyStamp( $s ); } )(), 'verifyStamp() gives the age' );
+same( null, $t->verifyStamp( '12:' ), 'an empty signature is invalid' );
+
 // --- on_block -----------------------------------------------------------------
 
 $seen = array();
