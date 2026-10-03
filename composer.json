@@ -3,10 +3,38 @@
     "description": "Stops form spam on any PHP site without CAPTCHAs: honeypot, JavaScript, timing and interaction checks, all on your own server.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["spam", "anti-spam", "honeypot", "form", "captcha", "contact form", "privacy", "gdpr"],
+    "keywords": [
+        "spam",
+        "anti-spam",
+        "honeypot",
+        "spam-protection",
+        "captcha-alternative",
+        "no-captcha",
+        "form",
+        "contact-form",
+        "privacy",
+        "gdpr"
+    ],
     "homepage": "https://accessnow.com.au/projects/spam-eater/",
-    "authors": [{ "name": "AccessNow", "homepage": "https://accessnow.com.au" }],
-    "require": { "php": ">=7.4" },
-    "autoload": { "psr-4": { "AccessNow\\SpamEater\\": "src/" } },
-    "scripts": { "test": "php tests/run.php" }
+    "authors": [
+        {
+            "name": "AccessNow",
+            "homepage": "https://accessnow.com.au"
+        }
+    ],
+    "require": {
+        "php": ">=7.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "AccessNow\\SpamEater\\": "src/"
+        }
+    },
+    "scripts": {
+        "test": "php tests/run.php"
+    },
+    "support": {
+        "issues": "https://github.com/scratchy-76/spam-eater-php/issues",
+        "source": "https://github.com/scratchy-76/spam-eater-php"
+    }
 }
