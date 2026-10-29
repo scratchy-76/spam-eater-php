@@ -13,15 +13,21 @@
  *  1. Honeypot: a hidden field people never see must stay empty (SE-B1).
  *  2. JavaScript token, set by the script (SE-C2).
  *  3. Timing: signed timestamp, not too fast, not expired (SE-D3, SE-E3, SE-G3).
- *  4. Interaction: a mouse, keyboard, touch or scroll event happened (SE-F4).
+ *  4. Interaction: a mouse, keyboard, touch or scroll event happened (SE-F4), and the visitor's
+ *     own interaction token hasn't already been used for too many submissions (SE-R4).
  *  5. Content: your own words and patterns, throwaway email addresses (SE-K5, SE-M5).
+ *
+ * With a refresh_url (0.2.0), the interaction token is issued to each visitor by that endpoint
+ * when they first touch the page, never printed in it: a bot that reads the page can't reuse it,
+ * an address can only fetch act_per_hour of them, and each one passes token_uses submissions.
+ * Without one, the page carries a rotating token that is the same for every visitor (as 0.1.0).
  */
 
 namespace AccessNow\SpamEater;
 
 final class Guard {
 
-	const VERSION = '0.1.0';
+	const VERSION = '0.2.0';
 
 	const HIDE_CSS = 'position:absolute!important;left:-9999px!important;top:-9999px!important;height:0!important;width:0!important;overflow:hidden!important;opacity:0!important;z-index:-1!important';
 
@@ -34,11 +40,15 @@ final class Guard {
 		'too_fast'           => 'SE-E3',
 		'expired_token'      => 'SE-G3',
 		'no_interaction'     => 'SE-F4',
+		'reused_token'       => 'SE-R4',
 		'blocked_words'      => 'SE-K5',
 		'disposable_email'   => 'SE-M5',
 	);
 
 	const BLOCKLIST_MAX = 500;
+
+	/** Most interaction-token ids remembered for counting uses. */
+	const USED_MAX = 5000;
 
 	/** @var array */
 	private $config;
@@ -68,8 +78,12 @@ final class Guard {
 	 *                                           addresses that keep filling in the honeypot aren't blocked.
 	 *     @type int            $min_seconds     Forms sent sooner than this after loading are refused. Default 3.
 	 *     @type int            $token_lifetime  Seconds a page's tokens stay valid (minimum 3600). Default two days.
-	 *     @type string         $refresh_url     URL of a script that calls sendTokens(), so pages served from a
-	 *                                           cache can fetch fresh tokens. Optional.
+	 *     @type string         $refresh_url     URL of a script that calls sendTokens(). Recommended: visitors get
+	 *                                           their own interaction token from it (and cached pages fresh tokens).
+	 *     @type int            $act_per_hour    Interaction tokens one address can fetch an hour (needs storage;
+	 *                                           0 = no limit). Default 60.
+	 *     @type int            $token_uses      Submissions one interaction token passes (needs storage; 0 = no
+	 *                                           limit). Default 5: enough to fix a mistake and send again.
 	 *     @type int            $block_after     Honeypot hits before an address is blocked (0 = never). Default 5.
 	 *     @type int            $block_hours     How long a block lasts. Default 24.
 	 *     @type string[]       $trusted_proxies Proxy addresses or CIDR ranges (Cloudflare, a load balancer).
@@ -89,6 +103,8 @@ final class Guard {
 				'min_seconds'      => 3,
 				'token_lifetime'   => 172800,
 				'refresh_url'      => '',
+				'act_per_hour'     => 60,
+				'token_uses'       => 5,
 				'block_after'      => 5,
 				'block_hours'      => 24,
 				'trusted_proxies'  => array(),
@@ -136,7 +152,7 @@ final class Guard {
 		$t  = $this->tokens();
 
 		return '<div class="se-wrap" aria-hidden="true" style="' . self::HIDE_CSS . '"'
-			. ' data-js="' . $t['js'] . '" data-act="' . $t['act'] . '" data-issued="' . $t['issued'] . '"'
+			. ' data-js="' . $t['js'] . '"' . ( isset( $t['act'] ) ? ' data-act="' . $t['act'] . '"' : '' ) . ' data-issued="' . $t['issued'] . '"'
 			. ( '' !== $this->config['refresh_url'] ? ' data-refresh="' . self::esc( $this->config['refresh_url'] ) . '"' : '' )
 			. '>'
 			. '<label for="' . $id . '">Leave this empty</label>'
@@ -165,30 +181,68 @@ final class Guard {
 	}
 
 	/**
-	 * Fresh tokens, for pages served from a cache.
+	 * Fresh tokens, for pages served from a cache. The interaction token is only included without
+	 * a refresh_url; with one, sendTokens() gives each visitor their own.
 	 *
-	 * @return array{js:string,act:string,ts:string,issued:int}
+	 * @return array{js:string,ts:string,issued:int,act?:string}
 	 */
 	public function tokens() {
-		return array(
+		$t = array(
 			'js'     => $this->tokens->token( 'js' ),
-			'act'    => $this->tokens->token( 'act' ),
 			'ts'     => $this->tokens->stamp(),
 			'issued' => $this->now(),
 		);
+		if ( ! $this->issuesAct() ) {
+			$t['act'] = $this->tokens->token( 'act' );
+		}
+		return $t;
 	}
 
 	/**
-	 * Send fresh tokens as JSON, from the script at refresh_url. Read-only: it returns
-	 * nothing a visitor couldn't read from the page.
+	 * The script at refresh_url. GET: fresh tokens, as JSON, for a cached page. POST (sent by the
+	 * script when the visitor first touches the page, with the form's se_ts): the visitor's own
+	 * interaction token for that timestamp, or a fresh timestamp too when theirs has expired.
+	 *
+	 * @param array|null $post   Default $_POST.
+	 * @param array|null $server Default $_SERVER.
 	 */
-	public function sendTokens() {
+	public function sendTokens( $post = null, $server = null ) {
+		$server = is_array( $server ) ? $server : $_SERVER;
+		$body   = $this->tokens();
+		if ( isset( $server['REQUEST_METHOD'] ) && 'POST' === $server['REQUEST_METHOD'] ) {
+			$post = is_array( $post ) ? $post : $_POST; // phpcs:ignore
+			$body = $this->issueAct( self::posted( $post, 'se_ts' ), Ip::client( $server, (array) $this->config['trusted_proxies'] ) );
+		}
 		if ( ! headers_sent() ) {
 			header( 'Content-Type: application/json; charset=utf-8' );
 			header( 'Cache-Control: no-store, max-age=0' );
 			header( 'X-Robots-Tag: noindex' );
+			if ( null === $body ) {
+				http_response_code( 429 );
+			}
 		}
-		echo json_encode( $this->tokens() );
+		echo json_encode( null === $body ? array( 'error' => 'limit' ) : $body );
+	}
+
+	/**
+	 * A visitor's interaction token (what sendTokens() answers a POST with).
+	 *
+	 * @param string $stamp The form's signed timestamp; a fresh one is issued when it's invalid or expired.
+	 * @param string $ip    The visitor's address.
+	 * @return array{ts:string,act:string}|null Null when the address has had its act_per_hour.
+	 */
+	public function issueAct( $stamp, $ip ) {
+		if ( ! $this->allowIssue( $ip ) ) {
+			return null;
+		}
+		$age = $this->tokens->verifyStamp( $stamp );
+		if ( null === $age || $age > $this->tokens->lifetime() ) {
+			$stamp = $this->tokens->stamp();
+		}
+		return array(
+			'ts'  => $stamp,
+			'act' => $this->tokens->actFor( $stamp ),
+		);
 	}
 
 	// =====================================================================
@@ -250,7 +304,15 @@ final class Guard {
 			if ( $age > $this->tokens->lifetime() ) {
 				return $this->flag( 'expired_token', $ip );
 			}
-			if ( ! $this->tokens->verify( 'act', self::posted( $post, 'se_act' ) ) ) {
+			if ( $this->issuesAct() ) {
+				$act = $this->tokens->verifyAct( self::posted( $post, 'se_ts' ), self::posted( $post, 'se_act' ) );
+				if ( null === $act ) {
+					return $this->flag( 'no_interaction', $ip );
+				}
+				if ( ! $this->useToken( $act ) ) {
+					return $this->flag( 'reused_token', $ip );
+				}
+			} elseif ( ! $this->tokens->verify( 'act', self::posted( $post, 'se_act' ) ) ) {
 				return $this->flag( 'no_interaction', $ip );
 			}
 		}
@@ -372,6 +434,82 @@ final class Guard {
 				return count( $list ) > Guard::BLOCKLIST_MAX ? array_slice( $list, -Guard::BLOCKLIST_MAX, null, true ) : $list;
 			}
 		);
+	}
+
+	/** Whether visitors get their own interaction tokens from refresh_url. */
+	private function issuesAct() {
+		return '' !== (string) $this->config['refresh_url'];
+	}
+
+	/**
+	 * Count an interaction token issued to an address; false once it has had act_per_hour.
+	 *
+	 * @param string $ip Address.
+	 * @return bool
+	 */
+	private function allowIssue( $ip ) {
+		$max = (int) $this->config['act_per_hour'];
+		if ( null === $this->storage || '' === $ip || $max <= 0 ) {
+			return true;
+		}
+		$key     = $this->ipKey( $ip );
+		$now     = $this->now();
+		$allowed = true;
+		$this->storage->update(
+			'issued',
+			function ( array $list ) use ( $key, $now, $max, &$allowed ) {
+				foreach ( $list as $k => $e ) {
+					if ( $now - (int) $e['since'] >= 3600 ) {
+						unset( $list[ $k ] );
+					}
+				}
+				$entry = isset( $list[ $key ] ) ? $list[ $key ] : array( 'since' => $now, 'count' => 0 );
+				if ( (int) $entry['count'] >= $max ) {
+					$allowed = false;
+					return $list;
+				}
+				$entry['count'] = (int) $entry['count'] + 1;
+				$list[ $key ]   = $entry;
+				return count( $list ) > Guard::BLOCKLIST_MAX ? array_slice( $list, -Guard::BLOCKLIST_MAX, null, true ) : $list;
+			}
+		);
+		return $allowed;
+	}
+
+	/**
+	 * Count a use of an interaction token; false once it has passed token_uses submissions. Counted
+	 * before the content check, so a message refused for its words still uses one up.
+	 *
+	 * @param string $id The token's id.
+	 * @return bool
+	 */
+	private function useToken( $id ) {
+		$max = (int) $this->config['token_uses'];
+		if ( null === $this->storage || $max <= 0 ) {
+			return true;
+		}
+		$now      = $this->now();
+		$lifetime = $this->tokens->lifetime();
+		$allowed  = true;
+		$this->storage->update(
+			'used',
+			function ( array $list ) use ( $id, $now, $lifetime, $max, &$allowed ) {
+				foreach ( $list as $k => $e ) {
+					if ( $now - (int) $e['at'] > $lifetime ) {
+						unset( $list[ $k ] );
+					}
+				}
+				$entry = isset( $list[ $id ] ) ? $list[ $id ] : array( 'at' => $now, 'count' => 0 );
+				if ( (int) $entry['count'] >= $max ) {
+					$allowed = false;
+					return $list;
+				}
+				$entry['count'] = (int) $entry['count'] + 1;
+				$list[ $id ]    = $entry;
+				return count( $list ) > Guard::USED_MAX ? array_slice( $list, -Guard::USED_MAX, null, true ) : $list;
+			}
+		);
+		return $allowed;
 	}
 
 	private function blockSeconds() {

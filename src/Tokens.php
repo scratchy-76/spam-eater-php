@@ -1,7 +1,12 @@
 <?php
 /**
- * Signed tokens: the rotating JavaScript and interaction tokens, and the signed
+ * Signed tokens: the rotating JavaScript token, the interaction tokens, and the signed
  * timestamp that dates a form. All HMAC-SHA256 with the site's secret.
+ *
+ * Interaction tokens come two ways. actFor() issues one to a visitor after they touch the page,
+ * bound to their form's timestamp and unique to them, so it can't be read from the page and used
+ * by everyone (0.2.0). token( 'act' ) is the older rotating one, the same for every visitor, which
+ * a bot can copy from the page; it is only for sites with no endpoint to issue the other kind.
  */
 
 namespace AccessNow\SpamEater;
@@ -91,6 +96,33 @@ final class Tokens {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * An interaction token for a signed timestamp: "id.signature". The id is random, so every
+	 * visitor's token is different and can be counted (Guard limits how often one is used), and
+	 * the token is worthless with any other timestamp.
+	 *
+	 * @param string $stamp The form's signed timestamp.
+	 * @return string
+	 */
+	public function actFor( $stamp ) {
+		$id = bin2hex( random_bytes( 8 ) );
+		return $id . '.' . $this->sign( 'act|' . $stamp . '|' . $id );
+	}
+
+	/**
+	 * Check an interaction token from actFor().
+	 *
+	 * @param mixed $stamp The submitted signed timestamp.
+	 * @param mixed $value The submitted token.
+	 * @return string|null The token's id, or null when it wasn't issued for that timestamp.
+	 */
+	public function verifyAct( $stamp, $value ) {
+		if ( ! is_string( $value ) || ! preg_match( '/^([0-9a-f]{16})\.([0-9a-f]{32})$/', $value, $m ) ) {
+			return null;
+		}
+		return hash_equals( $this->sign( 'act|' . (string) $stamp . '|' . $m[1] ), $m[2] ) ? $m[1] : null;
 	}
 
 	/**

@@ -42,8 +42,11 @@ function guard( array $extra = array() ) {
 /** What a real browser sends: the form loaded, tokens filled in, $wait seconds later. */
 function human( Guard $g, $wait = 10, array $fields = array() ) {
 	global $now;
-	$t     = $g->tokens();
-	$now  += $wait;
+	$t = $g->tokens();
+	if ( ! isset( $t['act'] ) ) { // With a refresh_url the script asks for the visitor's own.
+		$t = array_merge( $t, $g->issueAct( $t['ts'], '203.0.113.7' ) );
+	}
+	$now += $wait;
 	return array_merge(
 		array(
 			'name'           => 'Jo',
@@ -231,6 +234,73 @@ ok( ! $t->verify( 'js', $token ), 'two ticks later it is not' );
 same( 3600, ( new \AccessNow\SpamEater\Tokens( $secret, 60 ) )->lifetime(), 'lifetime is at least an hour' );
 same( 5, ( function () use ( $t, &$now ) { $s = $t->stamp(); $now += 5; return $t->verifyStamp( $s ); } )(), 'verifyStamp() gives the age' );
 same( null, $t->verifyStamp( '12:' ), 'an empty signature is invalid' );
+
+// --- Interaction tokens issued per visitor (refresh_url) -------------------------
+
+$url = array( 'refresh_url' => '/tokens.php', 'block_after' => 0 );
+$g   = guard( $url );
+$t   = $g->tokens();
+ok( ! isset( $t['act'] ) && false === strpos( $g->field(), 'data-act' ), 'with refresh_url, the page has no interaction token' );
+ok( isset( guard()->tokens()['act'] ) && false !== strpos( guard()->field(), 'data-act' ), 'without one, it still does' );
+same( false, $g->check( human( $g ), 'full', $server ), 'with refresh_url, a real submission passes' );
+
+$g    = guard( $url );
+$p    = human( $g );
+$p2   = human( $g );
+$p['se_act'] = $p2['se_act'];
+same( true, $g->check( $p, 'full', $server ), "another form's interaction token is spam" );
+same( 'SE-F4', $g->failCode(), 'its code' );
+
+$g = guard( $url );
+$p = human( $g );
+$p['se_act'] = ( new \AccessNow\SpamEater\Tokens( $secret ) )->token( 'act' );
+same( true, $g->check( $p, 'full', $server ), 'the old page-wide interaction token is spam' );
+
+$g = guard( $url );
+$p = human( $g );
+for ( $i = 1; $i <= 5; $i++ ) {
+	same( false, $g->check( $p, 'full', $server ), "one interaction token passes use $i" );
+}
+same( true, $g->check( $p, 'full', $server ), 'and is spam on use 6' );
+same( 'SE-R4', $g->failCode(), 'reused token code' );
+same( false, guard( $url + array( 'token_uses' => 0 ) )->check( $p, 'full', $server ), 'token_uses 0: no limit' );
+
+$g     = guard( $url + array( 'act_per_hour' => 3 ) );
+$stamp = $g->tokens()['ts'];
+$got   = array();
+for ( $i = 1; $i <= 4; $i++ ) {
+	$got[] = null !== $g->issueAct( $stamp, '198.51.100.9' );
+}
+same( array( true, true, true, false ), $got, 'act_per_hour limits tokens per address' );
+ok( null !== $g->issueAct( $stamp, '198.51.100.10' ), 'other addresses are unaffected' );
+$now += 3600;
+ok( null !== $g->issueAct( $stamp, '198.51.100.9' ), 'the limit resets after an hour' );
+
+$g     = guard( $url );
+$old   = $g->tokens()['ts'];
+$now  += 172800 + 10;
+$a     = $g->issueAct( $old, '203.0.113.7' );
+ok( $a['ts'] !== $old && null !== ( new \AccessNow\SpamEater\Tokens( $secret, 172800, $clock ) )->verifyStamp( $a['ts'] ), 'an expired timestamp gets a fresh one' );
+$a = $g->issueAct( 'nonsense', '203.0.113.7' );
+same( 0, ( new \AccessNow\SpamEater\Tokens( $secret, 172800, $clock ) )->verifyStamp( $a['ts'] ), 'so does an invalid one' );
+
+$g = guard( $url );
+ob_start();
+$g->sendTokens( array( 'se_ts' => $g->tokens()['ts'] ), array( 'REQUEST_METHOD' => 'POST', 'REMOTE_ADDR' => '203.0.113.7' ) );
+$json = json_decode( (string) ob_get_clean(), true );
+ok( isset( $json['ts'], $json['act'] ) && ! isset( $json['js'] ), 'sendTokens() answers a POST with ts and act' );
+ob_start();
+$g->sendTokens( null, array( 'REQUEST_METHOD' => 'GET' ) );
+$json = json_decode( (string) ob_get_clean(), true );
+ok( isset( $json['js'], $json['ts'] ) && ! isset( $json['act'] ), 'and a GET with js and ts, no act' );
+
+$t  = new \AccessNow\SpamEater\Tokens( $secret );
+$s1 = $t->stamp();
+$a1 = $t->actFor( $s1 );
+ok( (bool) preg_match( '/^[0-9a-f]{16}\.[0-9a-f]{32}$/', $a1 ) && $a1 !== $t->actFor( $s1 ), 'actFor() is id.signature, different each time' );
+same( substr( $a1, 0, 16 ), $t->verifyAct( $s1, $a1 ), 'verifyAct() gives the id' );
+same( null, $t->verifyAct( $s1 . 'x', $a1 ), 'verifyAct() refuses another stamp' );
+same( null, $t->verifyAct( $s1, array( $a1 ) ), 'verifyAct() refuses an array' );
 
 // --- on_block -----------------------------------------------------------------
 

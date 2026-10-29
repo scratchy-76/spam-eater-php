@@ -1,7 +1,8 @@
 <?php
 /**
- * Where Spam Eater keeps its one piece of state: the list of addresses that keep
- * filling in the hidden field. Implement this to keep it in a database, Redis or APCu.
+ * Where Spam Eater keeps its state: the list of addresses that keep filling in the hidden
+ * field ('blocked'), and with a refresh_url the interaction tokens issued per address
+ * ('issued') and used ('used'). Implement this to keep them in a database, Redis or APCu.
  */
 
 namespace AccessNow\SpamEater;
